@@ -16,6 +16,8 @@
           ;; Clojush system arguments
           ;;----------------------------------------
           :use-single-thread false ;; When true, Clojush will only use a single thread
+          :use-seeded-population false ;; When true, Clojush will use Lexicase selection to
+                                       ;; seed the initial population, thereby reducing the chance for random, useless programs to make their way into the initial population
           :random-seed (random/generate-mersennetwister-seed) ;; The seed for the random number generator
           :run-uuid nil ;; This will be set to a new type 4 pseudorandom UUID on every run
           ;;
@@ -29,6 +31,7 @@
                                      (fn [] (lrand-int 100))
                                      (fn [] (lrand))))
           :population-size 1000 ;; Number of individuals in the population
+          :pool-size 100 ;; Number of individuals in a pool for initial seeding of population
           :max-generations 1001 ;; The maximum number of generations to run GP
           :max-point-evaluations 10e100 ;; The limit for the number of point (instruction) evaluations to execute during the run
           :max-points 200 ;; Maximum size of push programs and push code, as counted by points in the program. 1/4 this limit is used as the limit for sizes of Plush genomes.
@@ -167,7 +170,7 @@
                                                         (:atom-generators @push-argmap))))
     (swap! push-argmap assoc :replace-child-that-exceeds-size-limit-with :empty)))
 
-(defn reset-globals
+(defn reset-globals 
   "Resets all Clojush globals according to values in @push-argmap. If an argmap argument is provided then it is loaded 
 into @push-argmap first."
   ([]
@@ -186,32 +189,6 @@ into @push-argmap first."
   ;(.printStackTrace except)
   (repl/pst except 10000)
   (System/exit 0))
-
-(defn make-pop-agents
-  "Makes the population of agents containing the initial random individuals in the population.
-   Argument is a push argmap"
-  [{:keys [use-single-thread population-size
-           max-genome-size-in-initial-program atom-generators]
-    :as argmap}]
-  (let [population-agents (repeatedly population-size
-                                      #(make-individual
-                                         :genome (random-plush-genome max-genome-size-in-initial-program
-                                                                      atom-generators
-                                                                      argmap)
-                                         :genetic-operators :random))]
-    (mapv #(if use-single-thread
-             (atom %)
-             (agent % :error-handler agent-error-handler))
-          population-agents)))
-
-(defn make-child-agents
-  "Makes the population of agents containing the initial random individuals in the population.
-   Argument is a push argmap."
-  [{:keys [use-single-thread population-size]}]
-  (vec (repeatedly population-size
-                   #((if use-single-thread atom agent)
-                      (make-individual)
-                      :error-handler agent-error-handler))))
 
 (defn make-rng
   "Creates the random number generators used by the agents in the population.
@@ -237,6 +214,71 @@ into @push-argmap first."
               pop-agents
               rand-gens))
   (when-not use-single-thread (apply await pop-agents))) ;; SYNCHRONIZE
+
+(defn get-ten-agents-from-pool
+  [{:keys [use-single-thread pool-size
+           max-genome-size-in-initial-program atom-generators]
+    :as argmap}]
+  (let [population-individuals (repeatedly pool-size
+                                            #(make-individual
+                                               :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                            atom-generators
+                                                                            argmap)
+                                               :genetic-operators :random))
+        {:keys [rand-gens random-seeds]} (make-rng argmap)]
+    (let [population-agents (mapv #(if use-single-thread
+                                     (atom %)
+                                     (agent % :error-handler agent-error-handler))
+                                  population-individuals)]
+      (population-translate-plush-to-push population-agents argmap)
+      (compute-errors population-agents 
+                      rand-gens
+                      argmap)
+      (loop [the-list (map deref population-agents)
+             return-list '()]
+        (if (>= (count return-list) 10)
+          (map #(if use-single-thread
+                                    (atom %)
+                                    (agent % :error-handler agent-error-handler))
+                return-list)
+          (let [the-chosen-one (lexicase-selection the-list 0 {:trivial-geography-radius 0})]
+            (recur
+              (remove #(= % the-chosen-one) the-list)
+              (conj return-list the-chosen-one))))))))
+
+
+;(get-ten-agents-from-pool @push-argmap)
+
+(defn make-pop-agents
+  "Makes the population of agents containing the initial random individuals in the population.
+   Argument is a push argmap"
+  [{:keys [use-single-thread population-size use-seeded-population
+           max-genome-size-in-initial-program atom-generators]
+    :as argmap}] ; can i just reuse these in the other function?
+  (if use-seeded-population
+    (apply concat (repeatedly (/ population-size 10)
+                              #(get-ten-agents-from-pool argmap)))
+    (let [population-agents (repeatedly population-size
+                                        #(make-individual
+                                           :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                        atom-generators
+                                                                        argmap)
+                                           :genetic-operators :random))]
+      (mapv #(if use-single-thread
+               (atom %)
+               (agent % :error-handler agent-error-handler))
+            population-agents))))
+
+;(count (make-pop-agents @push-argmap))
+
+(defn make-child-agents
+  "Makes the population of agents containing the initial random individuals in the population.
+   Argument is a push argmap."
+  [{:keys [use-single-thread population-size]}]
+  (vec (repeatedly population-size
+                   #((if use-single-thread atom agent)
+                      (make-individual)
+                      :error-handler agent-error-handler))))
 
 (defn produce-new-offspring
   [pop-agents child-agents rand-gens
