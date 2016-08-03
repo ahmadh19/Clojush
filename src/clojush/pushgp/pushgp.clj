@@ -18,6 +18,8 @@
           :use-single-thread false ;; When true, Clojush will only use a single thread
           :use-seeded-population false ;; When true, Clojush will use Lexicase selection to
                                        ;; seed the initial population, thereby reducing the chance for random, useless programs to make their way into the initial population
+          :enforce-diverse-population false ;; When true, Clojush will enforce an initial population containing individuals that
+                                           ;; have unique error vectors, thereby making the population behaviorally diverse
           :random-seed (random/generate-mersennetwister-seed) ;; The seed for the random number generator
           :run-uuid nil ;; This will be set to a new type 4 pseudorandom UUID on every run
           ;;
@@ -248,26 +250,63 @@ into @push-argmap first."
 
 
 ;(get-ten-agents-from-pool @push-argmap)
+;(require 'clojush.problems.demos.odd)
+;(reset! global-atom-generators '(0))
+
+(defn make-diverse-pop
+  [{:keys [use-single-thread population-size 
+           max-genome-size-in-initial-program atom-generators]
+    :as argmap}]
+  (loop [return-list '()] 
+    (if (>= (count return-list) population-size) 
+      (take population-size 
+            (mapv #(if use-single-thread
+                                     (atom %)
+                                     (agent % :error-handler agent-error-handler))
+                return-list))
+      (let [population-individuals (repeatedly population-size
+                                               #(make-individual
+                                                  :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                               atom-generators
+                                                                               argmap)
+                                                  :genetic-operators :random))
+            population-agents (mapv #(if use-single-thread
+                                       (atom %)
+                                       (agent % :error-handler agent-error-handler))
+                                    population-individuals)
+            {:keys [rand-gens random-seeds]} (make-rng argmap)]
+        (population-translate-plush-to-push population-agents argmap)
+        (compute-errors population-agents rand-gens argmap)
+        (recur
+          (map rand-nth (vals (group-by :errors (concat 
+                                                  (map deref population-agents) 
+                                                  return-list)))))))))
+
+;(count (distinct (map :errors (make-diverse-pop (assoc @push-argmap
+;                                                :error-function 
+;                                                 (:error-function clojush.problems.demos.odd/argmap))))))
 
 (defn make-pop-agents
   "Makes the population of agents containing the initial random individuals in the population.
    Argument is a push argmap"
-  [{:keys [use-single-thread population-size use-seeded-population
+  [{:keys [use-single-thread population-size use-seeded-population enforce-diverse-population
            max-genome-size-in-initial-program atom-generators]
     :as argmap}] ; can i just reuse these in the other function?
   (if use-seeded-population
     (apply concat (repeatedly (/ population-size 10)
                               #(get-ten-agents-from-pool argmap)))
-    (let [population-agents (repeatedly population-size
-                                        #(make-individual
-                                           :genome (random-plush-genome max-genome-size-in-initial-program
-                                                                        atom-generators
-                                                                        argmap)
-                                           :genetic-operators :random))]
-      (mapv #(if use-single-thread
-               (atom %)
-               (agent % :error-handler agent-error-handler))
-            population-agents))))
+    (if enforce-diverse-population
+      (make-diverse-pop argmap)
+      (let [population-agents (repeatedly population-size
+                                          #(make-individual
+                                             :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                          atom-generators
+                                                                          argmap)
+                                             :genetic-operators :random))]
+        (mapv #(if use-single-thread
+                 (atom %)
+                 (agent % :error-handler agent-error-handler))
+              population-agents)))))
 
 ;(count (make-pop-agents @push-argmap))
 
