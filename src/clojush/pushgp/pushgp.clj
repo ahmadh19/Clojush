@@ -290,13 +290,17 @@ into @push-argmap first."
   "Makes the population of agents containing the initial random individuals in the population.
    Argument is a push argmap"
   [{:keys [use-single-thread population-size use-seeded-population enforce-diverse-population
-           max-genome-size-in-initial-program atom-generators]
+           max-genome-size-in-initial-program atom-generators max-generations]
     :as argmap}] ; can i just reuse these in the other function?
   (if use-seeded-population
     (apply concat (repeatedly (/ population-size 10)
-                              #(get-ten-agents-from-pool argmap)))
+                             #(get-ten-agents-from-pool argmap)))
     (if enforce-diverse-population
-      (make-diverse-pop argmap)
+      (let [population-agents (make-diverse-pop argmap)
+            reduced-number-of-gens (/ (- @evaluations-count population-size) population-size)]
+        (swap! push-argmap assoc :max-generations 
+               (- (@push-argmap :max-generations) reduced-number-of-gens))
+        population-agents)
       (let [population-agents (repeatedly population-size
                                           #(make-individual
                                              :genome (random-plush-genome max-genome-size-in-initial-program
@@ -385,7 +389,7 @@ into @push-argmap first."
       (timer @push-argmap :initialization)
       (println "\n;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;")
       (println "\nGenerating initial population...")
-      (let [pop-agents (make-pop-agents @push-argmap)
+      (let [pop-agents (make-pop-agents @push-argmap) 
             child-agents (make-child-agents @push-argmap)
             {:keys [rand-gens random-seeds]} (make-rng @push-argmap)]
         ;(print "Random seeds: ")
