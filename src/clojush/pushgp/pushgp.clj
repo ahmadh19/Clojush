@@ -16,6 +16,7 @@
           ;; Clojush system arguments
           ;;----------------------------------------
           :use-single-thread false ;; When true, Clojush will only use a single thread
+          :use-pareto-seeding false ;; When true, Clojush will use Pareto tournaments to seed the initial population
           :use-seeded-population false ;; When true, Clojush will use Lexicase selection to
                                        ;; seed the initial population, thereby reducing the chance for random, useless programs to make their way into the initial population
           :enforce-diverse-population false ;; When true, Clojush will enforce an initial population containing individuals that
@@ -248,11 +249,6 @@ into @push-argmap first."
               (remove #(= % the-chosen-one) the-list)
               (conj return-list the-chosen-one))))))))
 
-
-;(get-ten-agents-from-pool @push-argmap)
-;(require 'clojush.problems.demos.odd)
-;(reset! global-atom-generators '(0))
-
 (defn make-diverse-pop
   [{:keys [use-single-thread population-size 
            max-genome-size-in-initial-program atom-generators]
@@ -282,14 +278,54 @@ into @push-argmap first."
                                                   (map deref population-agents) 
                                                   return-list)))))))))
 
-;(count (distinct (map :errors (make-diverse-pop (assoc @push-argmap
-;                                                :error-function 
-;                                                 (:error-function clojush.problems.demos.odd/argmap))))))
+(defn pareto-dominates?
+  "Returns true if ind1 Pareto-dominates ind2."
+  [ind1 ind2]
+  (let [err1 (:errors ind1)
+        err2 (:errors ind2)
+        error-comparison (map compare err1 err2)]
+    (and
+      (every? #(<= % 0) error-comparison)
+      (not-every? #(= % 0) error-comparison)))) ; basically means that at least one is -1
+
+(defn non-dominated-individual?
+  [individual population]
+  (empty? (filter #(pareto-dominates? % individual) population)))
+
+(defn generate-pareto-population
+  [{:keys [use-single-thread population-size pool-size
+           max-genome-size-in-initial-program atom-generators]
+    :as argmap}]
+  (loop [return-list '()] 
+    (if (>= (count return-list) population-size) 
+      (take population-size 
+            (mapv #(if use-single-thread
+                                     (atom %)
+                                     (agent % :error-handler agent-error-handler))
+                return-list))
+      (let [population-individuals (repeatedly pool-size
+                                               #(make-individual
+                                                  :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                               atom-generators
+                                                                               argmap)
+                                                  :genetic-operators :random))
+            population-agents (mapv #(if use-single-thread
+                                       (atom %)
+                                       (agent % :error-handler agent-error-handler))
+                                    population-individuals)
+            {:keys [rand-gens random-seeds]} (make-rng argmap)]
+        (population-translate-plush-to-push population-agents argmap)
+        (compute-errors population-agents rand-gens argmap)
+        (recur
+          (concat (filter #(non-dominated-individual? % (map deref population-agents))
+                          (map deref population-agents))
+                  return-list))))))
 
 (defn make-pop-agents
   "Makes the population of agents containing the initial random individuals in the population.
    Argument is a push argmap"
   [{:keys [use-single-thread population-size use-seeded-population enforce-diverse-population
+           use-pareto-seeding
            max-genome-size-in-initial-program atom-generators max-generations]
     :as argmap}] ; can i just reuse these in the other function?
   (if use-seeded-population
@@ -301,18 +337,18 @@ into @push-argmap first."
         (swap! push-argmap assoc :max-generations 
                (- (@push-argmap :max-generations) reduced-number-of-gens))
         population-agents)
-      (let [population-agents (repeatedly population-size
-                                          #(make-individual
-                                             :genome (random-plush-genome max-genome-size-in-initial-program
-                                                                          atom-generators
-                                                                          argmap)
-                                             :genetic-operators :random))]
-        (mapv #(if use-single-thread
-                 (atom %)
-                 (agent % :error-handler agent-error-handler))
-              population-agents)))))
-
-;(count (make-pop-agents @push-argmap))
+      (if use-pareto-seeding
+        (generate-pareto-population argmap)
+        (let [population-agents (repeatedly population-size
+                                            #(make-individual
+                                               :genome (random-plush-genome max-genome-size-in-initial-program
+                                                                            atom-generators
+                                                                            argmap)
+                                               :genetic-operators :random))]
+          (mapv #(if use-single-thread
+                   (atom %)
+                   (agent % :error-handler agent-error-handler))
+                population-agents))))))
 
 (defn make-child-agents
   "Makes the population of agents containing the initial random individuals in the population.
@@ -396,6 +432,7 @@ into @push-argmap first."
         ;(doseq [seed random-seeds] (print " " seed))
         ;(println)
         ;; Main loop
+        (println "At least the GP process starts...!")
         (loop [generation 0]
           (println "Processing generation:" generation)
           (population-translate-plush-to-push pop-agents @push-argmap)
